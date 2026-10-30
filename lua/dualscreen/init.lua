@@ -15,7 +15,7 @@
 
 DS = DS or {}
 
-DS.VERSION = "0.5"
+DS.VERSION = "0.6"
 
 -- True while a companion Presentation is actually up on a secondary display.
 -- Derived from the Java side, never assumed. Every dual-screen path sits
@@ -40,17 +40,30 @@ local keyboard = require("dualscreen.keyboard")
 local menu     = require("dualscreen.menu")
 local led      = require("dualscreen.led")
 local hud      = require("dualscreen.hud")
+local swap     = require("dualscreen.swap")
 
 DS.settings = settings
 pcall(settings.install)
 pcall(buttons.install)
 pcall(menu.install)
+pcall(swap.install)
 
 DS.gamepad = gamepad
 
 DS.bridge = bridge
 
 DS.log("native bridge available: " .. tostring(bridge.native_available))
+
+-- Diagnostic: the geometry the game is drawing into. Issue #3 (a two-screen
+-- device with 640x480 panels) showed a CRT-shaped artefact on both screens
+-- and no numbers to reason from. This line gives them to the next report.
+pcall(function()
+    local uw, uh = love.graphics.getDimensions()
+    local pw, ph = uw, uh
+    if love.graphics.getPixelDimensions then pw, ph = love.graphics.getPixelDimensions() end
+    local dpi = love.graphics.getDPIScale and love.graphics.getDPIScale() or 1
+    DS.log(("window %dx%d units, %dx%d px, dpiscale %.3f"):format(uw, uh, pw, ph, dpi))
+end)
 
 -- Diagnostic: does LOVE see the Thor's physical controls as a joystick at all?
 -- Android exposes them as an "Odin Controller" input device; whether SDL maps
@@ -445,6 +458,13 @@ function DS.click_at(px, py)
             end
         end
     end
+    return DS.click_node(node)
+end
+
+--- Click the nearest actionable ancestor of `node`. Split out of click_at so
+--- that swapped screens (swap.lua), which resolve companion taps against
+--- the game's own hash, click through exactly the same walk.
+function DS.click_node(node)
     local guard = 0
     while node and guard < 32 do
         guard = guard + 1
@@ -624,6 +644,10 @@ local last_active = nil
 -- Panel size is re-queried rather than cached: the Presentation is recreated
 -- by lifecycle events, and a recreated one may differ.
 DS.panel_w, DS.panel_h = 0, 0
+-- The companion window's own size, which the panel size equals unless the
+-- screens are swapped (then the panel is this window). See the update loop.
+DS.pres_w, DS.pres_h = 0, 0
+DS.swapped = false
 
 function love.update(dt)
     if orig_update then
@@ -889,17 +913,39 @@ function love.update(dt)
     --
     -- Cheap enough to do unconditionally: a JNI getter returning a short
     -- string, at most once per push (30 Hz).
-    local w, h = bridge.panel_size()
+    --
+    -- TWO sizes, since swapped screens. DS.pres_w/h is always the companion
+    -- window. DS.panel_w/h is wherever the PANEL is being drawn: the
+    -- companion normally, this window's pixel size while swapped. Everything
+    -- that lays out or hit-tests the panel reads panel_w/h and needs no
+    -- knowledge of the swap.
+    local pw, ph = bridge.panel_size()
+    if pw and pw > 0 and (pw ~= DS.pres_w or ph ~= DS.pres_h) then
+        DS.log(("companion size %dx%d (was %dx%d)"):format(pw, ph, DS.pres_w or 0, DS.pres_h or 0))
+        DS.pres_w, DS.pres_h = pw, ph
+    end
+    local w, h = pw, ph
+    DS.swapped = swap.active()
+    if DS.swapped then
+        w, h = swap.window_pixels()
+    end
     if w and w > 0 and (w ~= DS.panel_w or h ~= DS.panel_h) then
-        DS.log(("panel size %dx%d (was %dx%d)"):format(w, h, DS.panel_w, DS.panel_h))
+        DS.log(("panel size %dx%d (was %dx%d)%s"):format(w, h, DS.panel_w, DS.panel_h,
+                                                        DS.swapped and " [swapped]" or ""))
         DS.panel_w, DS.panel_h = w, h
         last_signature = nil   -- geometry changed, so the last snapshot is stale
     end
 
-    -- 1. Drain events from screen 2 and apply them.
+    -- 1. Drain events from screen 2 and apply them. While swapped, this
+    --    window's own touches arrive the same way, tagged as not-companion.
     local applied = false
     for _, ev in ipairs(bridge.poll_events()) do
-        if events.dispatch(ev) then
+        if events.dispatch(ev, true) then
+            applied = true
+        end
+    end
+    for _, ev in ipairs(swap.poll_events()) do
+        if events.dispatch(ev, false) then
             applied = true
         end
     end
@@ -931,6 +977,12 @@ function love.update(dt)
             DS.log("card_rects failed: " .. tostring(res))
         end
     end
+    -- Swapped: the rects are in THIS window's pixels, for its own drag
+    -- seeding. Java must not see them -- its taps are in the companion's
+    -- pixel space, and a coincidental overlap would start a drag of a card
+    -- that is not on that screen.
+    swap.rects = DS.swapped and rects or nil
+    if DS.swapped then rects = nil end
     local snap = snapshot.build(bridge.generation, rects)
     local sig = snapshot.signature(snap)
     if sig ~= last_signature then
@@ -1144,6 +1196,25 @@ function love.draw()
         -- Optional CRT pass: the panel gets the same shader, same settings,
         -- as the top screen. Nil means off; push the plain canvas.
         local src = render.apply_crt(canvas, DS.panel_w, DS.panel_h) or canvas
+
+        -- SWAPPED SCREENS. The panel goes onto this window, over the frame
+        -- vanilla already drew, and what the companion gets instead is that
+        -- frame, mirrored from G.CANVAS. Same push path from here on.
+        if DS.swapped then
+            render.blit_to_window(src, DS.panel_w, DS.panel_h)
+            local pw, ph = DS.pres_w or 0, DS.pres_h or 0
+            if pw <= 0 or ph <= 0 then return end
+            local mirror = render.draw_mirror(pw, ph)
+            if not mirror then return end
+            src = render.apply_crt(mirror, pw, ph, "mirror") or mirror
+            local img = src:newImageData()
+            if not bridge.push_pixels_data(img, pw, ph) then
+                bridge.push_pixels(img:getString(), pw, ph)
+            end
+            if img.release then img:release() end
+            return
+        end
+
         local img = src:newImageData()
         -- Zero-copy first; the string path remains as the
         -- fallback for a native module that predates push_pixels2.

@@ -141,6 +141,66 @@ android build env:
 
 ---
 
+## Building on Windows
+
+The toolchain pins are the same. Two things seen on a Windows 11 host:
+
+- **Gradle may be unable to start at all**, with
+  `java.io.IOException: Unable to establish loopback connection`. That is
+  `Selector.open()` failing inside the JDK — its Windows implementation
+  wakes selectors through a loopback TCP pair, and some firewall and VPN
+  software refuses that connect (`WSAEINVAL`). It is not a Gradle or JDK
+  version problem; it reproduced on JDK 17 and 21. If it happens, build in
+  WSL: Ubuntu with `openjdk-17-jdk-headless`, the command-line tools under
+  `/opt/android-sdk`, and `sdkmanager --install "ndk;25.2.9519653"`; sync the
+  checkout into the Linux filesystem (Gradle on `/mnt/c` is slow) and run
+  `python3 tools/build.py` there.
+- Git's `core.autocrlf` must be `false` for this repository. With it on, a
+  handful of vendored files with CRLF endings show as permanently modified,
+  and every file you edit comes back with CRLF.
+
+`build.py` picks `gradlew.bat` on Windows by itself.
+
+## Case matters on Linux
+
+The `noRecord` flavour's manifest (the one that strips `RECORD_AUDIO`) lives
+in `android/app/src/noRecord/`. It used to be `src/norecord/`, which Gradle
+finds on macOS and Windows (case-insensitive file systems) and silently
+ignores on Linux, where a release built in WSL or CI shipped with the
+microphone permission. If the shipped APK ever shows `RECORD_AUDIO` in
+`aapt dump badging`, this is the first thing to check.
+
+## Two files a fresh clone needs that git does not carry
+
+Both were found the first time this project was built on a machine other
+than the author's.
+
+- **`android/love/src/jni/love/src/common/config.h`.** The vendored LÖVE
+  tree's own `.gitignore` has a `config*` rule meant for autotools output,
+  and it swallowed this (hand-written, upstream-tracked) header when the
+  engine was vendored. It is now force-added; if it ever goes missing again,
+  it is `src/common/config.h` from the LÖVE 11.5 tag, unchanged.
+- **`android/love/src/jni/LuaJIT-2.1/android/<abi>/libluajit.a`.** A
+  prebuilt static library, gitignored, that `LuaJIT-2.1/Android.mk` consumes.
+  Build it once per release ABI (`arm64-v8a` and `armeabi-v7a`) with the NDK;
+  `LuaJIT-2.1/build_instructions.bat` has the recipe, which on Linux is:
+
+  ```bash
+  NDKBIN=$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/bin
+  cd android/love/src/jni/LuaJIT-2.1
+  make clean && make HOST_CC="gcc" CC=clang CROSS=aarch64-linux-android- \
+      STATIC_CC="$NDKBIN/aarch64-linux-android21-clang -fPIC" \
+      DYNAMIC_CC="$NDKBIN/aarch64-linux-android21-clang -fPIC" \
+      TARGET_AR="$NDKBIN/llvm-ar rcus" TARGET_SYS=Linux \
+      TARGET_LD="$NDKBIN/aarch64-linux-android21-clang" TARGET_LDFLAGS=-fuse-ld=lld \
+      TARGET_STRIP="$NDKBIN/llvm-strip" TARGET_SONAME=libluajit.so CCDEBUG=-g amalg -j6
+  cp src/libluajit.a android/arm64-v8a/
+  ```
+
+  For `armeabi-v7a` use `armv7a-linux-androideabi21-clang` and
+  `HOST_CC="gcc -m32"` (needs `gcc-multilib`). Do not copy the generated
+  `luajit.h` over the tracked one.
+
 ## Notes worth keeping
 
 - **The NDK is arm64-native despite the directory name.** The macOS toolchain sits at

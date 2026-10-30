@@ -37,6 +37,7 @@ from check_balatro_source import validate, report, NotBalatro  # noqa: E402
 from extract_balatro import extract  # noqa: E402
 from extract_icon import extract_icon  # noqa: E402
 from package_love import package  # noqa: E402
+import lovely  # noqa: E402
 
 # The version this project is developed and tested against. A different version
 # is a warning, not a refusal - the overlay wraps globals rather than patching
@@ -108,8 +109,19 @@ def do_extract(balatro):
     return count
 
 
-def do_inject():
+def do_inject(mods=None):
     step(3, 6, "Injecting the overlay")
+
+    # Mods first, on the vanilla tree, so their patches see exactly what
+    # Lovely would. The shim line they add to main.lua is prepended; the
+    # overlay's own line below is appended. tools/lovely.py has the details.
+    if mods:
+        try:
+            table = lovely.patch_tree(GAME_SRC, mods)
+        except lovely.LovelyError as e:
+            raise SystemExit("ERROR: mod patch error: %s" % e)
+        if table is None:
+            print("       no Lovely patch files under %s; nothing applied" % mods)
 
     if not os.path.isdir(OVERLAY_SRC):
         raise SystemExit("ERROR: overlay directory missing: %s" % OVERLAY_SRC)
@@ -130,8 +142,11 @@ def do_inject():
     copied = sum(len(f) for _, _, f in os.walk(dest))
     print("       lua/dualscreen/ -> dualscreen/  (%d files)" % copied)
 
+    # newline="" on both ends: Python's text mode would otherwise turn the
+    # game's LF endings into CRLF on Windows, which makes a Windows-built
+    # Game.love differ from a macOS one and breaks the cross-container check.
     main_lua = os.path.join(GAME_SRC, "main.lua")
-    with open(main_lua, encoding="utf8", errors="surrogateescape") as f:
+    with open(main_lua, encoding="utf8", errors="surrogateescape", newline="") as f:
         body = f.read()
 
     if INJECT_LINE in body:
@@ -148,7 +163,7 @@ def do_inject():
     body += "-- This is the ONLY modification made to the game's own source.\n"
     body += INJECT_LINE + "\n"
 
-    with open(main_lua, "w", encoding="utf8", errors="surrogateescape") as f:
+    with open(main_lua, "w", encoding="utf8", errors="surrogateescape", newline="") as f:
         f.write(body)
 
     print("       main.lua + %s" % INJECT_LINE)
@@ -291,6 +306,11 @@ def do_gradle(output):
             "    source ~/.config/android-build-env.sh"
         )
 
+    # The wrapper is a shell script on macOS/Linux and a batch file on
+    # Windows; both pin the same Gradle.
+    if os.name == "nt":
+        gradlew = os.path.join(ANDROID_DIR, "gradlew.bat")
+
     proc = subprocess.run(
         [gradlew, GRADLE_TASK, "--console=plain"],
         cwd=ANDROID_DIR, env=env,
@@ -330,7 +350,15 @@ def main():
                    help="build the PUBLISHABLE apk: contains no Balatro at all. "
                         "The game is assembled on device from the user's own copy "
                         "at first launch. --balatro is not needed and not used.")
+    p.add_argument("--mods",
+                   help="a Mods directory of Lovely-style mods to patch into the "
+                        "game (developer builds only; release builds apply the "
+                        "device's own Mods folder at assembly time)")
     args = p.parse_args()
+
+    if args.mods and args.release:
+        p.error("--mods applies to developer builds; the release APK reads "
+                "the device's Mods folder")
 
     if args.release:
         if args.balatro:
@@ -346,7 +374,7 @@ def main():
 
     do_validate(args.balatro)
     do_extract(args.balatro)
-    do_inject()
+    do_inject(args.mods)
     do_package()
 
     if args.no_apk:

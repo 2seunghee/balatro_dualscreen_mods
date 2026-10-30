@@ -20,6 +20,7 @@ package com.balatro.dualscreen;
 
 import android.content.Context;
 import android.util.Log;
+import com.balatro.dualscreen.mods.LovelyPatcher;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -31,6 +32,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -64,6 +68,15 @@ import java.util.zip.ZipOutputStream;
  * appended to main.lua, plus the overlay files, which the release APK
  * carries in its assets under dualscreen/ (they are this project's own
  * GPL code, not Balatro's).
+ *
+ * MODS. When the Mods folder (GameDirs.modsDir) holds Lovely patch files,
+ * they are applied to the game's sources here, during the repack -- the
+ * same rewrites Lovely would make at load time on desktop, done once. That
+ * adds a second line to main.lua, prepended, which loads the runtime shim
+ * (dualscreen/lovely.lua). With no mods installed neither the shim line nor
+ * anything else changes, and the result is the same archive as before mod
+ * support existed. tools/lovely.py is the reference for the patch engine;
+ * docs/decisions/0003-mod-support.md is the reasoning.
  */
 public final class GameAssembler {
     private static final String TAG = "BalatroDS";
@@ -92,6 +105,13 @@ public final class GameAssembler {
 
     public interface Progress {
         void update(String message, int percent);
+    }
+
+    /** What an assembly did with mods, for the screen that started it. */
+    public static final class Report {
+        public final List<String> mods = new ArrayList<>();
+        public final List<String> warnings = new ArrayList<>();
+        public int modulesRegistered;
     }
 
     private GameAssembler() {
@@ -255,10 +275,39 @@ public final class GameAssembler {
      */
     public static File assemble(Context ctx, Info info, Progress progress)
             throws IOException {
+        return assemble(ctx, info, progress, new Report());
+    }
+
+    public static File assemble(Context ctx, Info info, Progress progress,
+                                final Report report) throws IOException {
         String[] overlay = ctx.getAssets().list("dualscreen");
         if (overlay == null || overlay.length == 0) {
             throw new IOException("this APK carries no dualscreen overlay in"
                     + " its assets; it is not a release build");
+        }
+
+        // Mods first, so a broken patch file refuses the build before a
+        // single byte is written. Lovely crashes the game at startup for
+        // these; refusing here with the file named is the kinder version.
+        LovelyPatcher.PatchTable mods;
+        File modsDir = GameDirs.modsDir(ctx);
+        try {
+            mods = LovelyPatcher.load(modsDir, new LovelyPatcher.Log() {
+                @Override public void warn(String msg) {
+                    Log.w(TAG, "lovely: " + msg);
+                    report.warnings.add(msg);
+                }
+            });
+        } catch (LovelyPatcher.LovelyException e) {
+            throw new IOException("mod patch error: " + e.getMessage(), e);
+        }
+        if (mods != null) {
+            report.mods.addAll(mods.modNames);
+            report.modulesRegistered = mods.moduleCount();
+            Log.i(TAG, "mods: " + mods.modNames);
+            if (progress != null) {
+                progress.update("Applying mods: " + mods.modNames, 3);
+            }
         }
 
         File dest = new File(ctx.getFilesDir(), ASSEMBLED_NAME);
@@ -276,20 +325,32 @@ public final class GameAssembler {
                 if (e.isDirectory()) {
                     continue;
                 }
-                out.putNextEntry(new ZipEntry(e.getName()));
-                if (e.getName().equals("main.lua")) {
+                String name = e.getName();
+                out.putNextEntry(new ZipEntry(name));
+                boolean isMain = name.equals("main.lua");
+                boolean patched = mods != null && mods.needsPatching(name);
+                if (isMain || patched) {
                     byte[] body = readAll(in);
-                    out.write(body);
-                    String tailText = new String(
-                            body, Math.max(0, body.length - 1),
-                            body.length > 0 ? Math.min(1, body.length) : 0,
-                            StandardCharsets.UTF_8);
-                    if (!tailText.equals("\n")) {
-                        out.write('\n');
+                    String text = new String(body, StandardCharsets.UTF_8);
+                    if (patched) {
+                        try {
+                            text = mods.apply(name, text);
+                        } catch (LovelyPatcher.LovelyException ex) {
+                            throw new IOException("mod patch error in " + name
+                                    + ": " + ex.getMessage(), ex);
+                        }
                     }
-                    out.write(INJECT_LINE.getBytes(StandardCharsets.UTF_8));
-                    out.write('\n');
-                    injected = true;
+                    if (isMain) {
+                        if (mods != null) {
+                            text = LovelyPatcher.SHIM_REQUIRE + "\n" + text;
+                        }
+                        if (!text.endsWith("\n")) {
+                            text += "\n";
+                        }
+                        text += INJECT_LINE + "\n";
+                        injected = true;
+                    }
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
                 } else {
                     pipe(in, out);
                 }
@@ -316,6 +377,16 @@ public final class GameAssembler {
                 }
                 out.closeEntry();
             }
+
+            // Module sources and the manifest the shim reads. Outside
+            // dualscreen/, which is copied verbatim from the overlay.
+            if (mods != null) {
+                for (Map.Entry<String, byte[]> extra : mods.extraFiles().entrySet()) {
+                    out.putNextEntry(new ZipEntry(extra.getKey()));
+                    out.write(extra.getValue());
+                    out.closeEntry();
+                }
+            }
         } catch (IOException e) {
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
@@ -338,6 +409,44 @@ public final class GameAssembler {
     public static File assembled(Context ctx) {
         File f = new File(ctx.getFilesDir(), ASSEMBLED_NAME);
         return f.exists() && f.length() > 0 ? f : null;
+    }
+
+    /**
+     * The user's Balatro copy as last supplied, or null if it is gone.
+     *
+     * SetupActivity keeps it under files/ so mods can be applied later
+     * without asking for the file again. Older installs copied it to the
+     * cache directory only; that copy is honoured while it survives.
+     */
+    public static File source(Context ctx) {
+        File kept = GameDirs.keptSource(ctx);
+        if (kept.isFile() && kept.length() > 0) {
+            return kept;
+        }
+        File legacy = new File(ctx.getCacheDir(), "balatro-source.bin");
+        if (legacy.isFile() && legacy.length() > 0) {
+            return legacy;
+        }
+        return null;
+    }
+
+    /**
+     * Rebuild the game from the kept source, applying whatever is in Mods
+     * now. Throws with a readable message when the source is gone, in which
+     * case the setup screen has to ask for the file again.
+     */
+    public static File rebuild(Context ctx, Progress progress, Report report)
+            throws IOException {
+        File src = source(ctx);
+        if (src == null) {
+            throw new IOException("your Balatro copy is no longer on the device;"
+                    + " choose the file again in setup");
+        }
+        Info info = probe(ctx, src);
+        if (!info.usable()) {
+            throw new IOException("the kept Balatro copy is unusable: " + info.problem);
+        }
+        return assemble(ctx, info, progress, report);
     }
 
     // ------------------------------------------------------------------

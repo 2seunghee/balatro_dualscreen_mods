@@ -40,20 +40,25 @@ render.canvas_h = 0
 --- to w*dpiscale x h*dpiscale, and this device reports 2.3077, so an unpinned
 --- canvas would be 5.3x the pixels and 5.3x the cost -- silently.
 --- See ADR 0001's amendment.
--- Second cached canvas, for the optional CRT pass over the panel.
-local crt_canvas, crt_w, crt_h = nil, 0, 0
+-- Cached canvases for the optional CRT pass, one per SLOT: the panel, and
+-- the mirrored frame while the screens are swapped. Two slots because they
+-- differ in size and alternate every frame; a single cache would release
+-- and reallocate a canvas on each call.
+local crt_slots = {}
 
-function render.get_crt_canvas(w, h)
-    if crt_canvas and crt_w == w and crt_h == h then
-        return crt_canvas
+function render.get_crt_canvas(w, h, slot)
+    slot = slot or "panel"
+    local s = crt_slots[slot]
+    if s and s.w == w and s.h == h then
+        return s.canvas
     end
-    if crt_canvas then
-        crt_canvas:release()
-        crt_canvas = nil
+    if s then
+        s.canvas:release()
+        crt_slots[slot] = nil
     end
     local ok, c = pcall(love.graphics.newCanvas, w, h, { dpiscale = 1 })
     if not ok or not c then return nil end
-    crt_canvas, crt_w, crt_h = c, w, h
+    crt_slots[slot] = { canvas = c, w = w, h = h }
     return c
 end
 
@@ -66,7 +71,7 @@ end
 --- (vanilla uses its own canvas height), and the "mouse" position -- which
 --- the shader uses for a subtle hover warp -- is pinned to the panel centre,
 --- since the player's cursor has no meaning on this screen.
-function render.apply_crt(canvas, w, h)
+function render.apply_crt(canvas, w, h, slot)
     local settings = require("dualscreen.settings")
     if not settings.crt2() then return nil end
     local crt = G and G.SETTINGS and G.SETTINGS.GRAPHICS
@@ -75,7 +80,7 @@ function render.apply_crt(canvas, w, h)
     local shader = G.SHADERS and G.SHADERS["CRT"]
     if not shader then return nil end
 
-    local out = render.get_crt_canvas(w, h)
+    local out = render.get_crt_canvas(w, h, slot)
     if not out then return nil end
 
     -- Edge-smear guard: inside the feather band the shader samples with
@@ -121,6 +126,68 @@ function render.apply_crt(canvas, w, h)
     love.graphics.setCanvas(prev_canvas)
     love.graphics.pop()
     return out
+end
+
+-- Third cached canvas: the game frame mirrored to the companion while the
+-- screens are swapped (swap.lua). Sized to the companion, pinned like the
+-- others.
+local mirror_canvas, mirror_w, mirror_h = nil, 0, 0
+
+function render.get_mirror_canvas(w, h)
+    if mirror_canvas and mirror_w == w and mirror_h == h then
+        return mirror_canvas
+    end
+    if mirror_canvas then
+        mirror_canvas:release()
+        mirror_canvas = nil
+    end
+    local ok, c = pcall(love.graphics.newCanvas, w, h, { dpiscale = 1 })
+    if not ok or not c then return nil end
+    mirror_canvas, mirror_w, mirror_h = c, w, h
+    return c
+end
+
+--- Draw G.CANVAS -- the game's finished frame, before its CRT pass -- into a
+--- companion-sized canvas, letterboxed. Returns the canvas, or nil when
+--- there is no frame to mirror. The fit comes from swap.mirror_fit so that
+--- companion taps invert exactly this transform.
+function render.draw_mirror(w, h)
+    local src = G and G.CANVAS
+    if not src then return nil end
+    local swap = require("dualscreen.swap")
+    local k, sx, sy = swap.mirror_fit(w, h)
+    if not k then return nil end
+    local canvas = render.get_mirror_canvas(w, h)
+    if not canvas then return nil end
+
+    local prev = love.graphics.getCanvas()
+    love.graphics.push()
+    love.graphics.origin()
+    love.graphics.setCanvas(canvas)
+    love.graphics.clear(0, 0, 0, 1)
+    love.graphics.setShader()
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(src, sx, sy, 0, k, k)
+    love.graphics.setCanvas(prev)
+    love.graphics.pop()
+    return canvas
+end
+
+--- Put the panel canvas on THIS window, scaled from its pixel size to the
+--- window's unit size. Used only while swapped; the window otherwise shows
+--- the game's own frame, which vanilla has already drawn by the time this
+--- runs.
+function render.blit_to_window(canvas, w, h)
+    if not canvas then return end
+    local uw, uh = love.graphics.getDimensions()
+    love.graphics.push()
+    love.graphics.origin()
+    love.graphics.setCanvas()
+    love.graphics.setShader()
+    love.graphics.clear(0, 0, 0, 1)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(canvas, 0, 0, 0, uw / w, uh / h)
+    love.graphics.pop()
 end
 
 function render.get_canvas(w, h)

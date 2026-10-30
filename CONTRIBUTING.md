@@ -36,6 +36,13 @@ device that has only one, the game must behave exactly like vanilla.
   python3 tools/build.py --balatro /path/to/Balatro.exe
   ```
 - Test on a device. "The code looks right" is not verification.
+- If you touched the mod patch engine (`tools/lovely.py` or
+  `LovelyPatcher.java`), run both of these; the Python and Java engines must
+  stay byte-for-byte identical:
+  ```bash
+  python3 tools/test_lovely.py
+  python3 tools/check_lovely_parity.py
+  ```
 - Keep comments functional: explain why something non-obvious is the way it is,
   and cite vanilla `file:line` when the reason lives in the game's own code.
 

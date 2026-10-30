@@ -24,7 +24,9 @@ The overlay works by reassigning globals at load time — `set_screen_positions`
 `CardArea:move`, `Game:draw`, `love.resize` and friends are all globals with
 nothing shadowing them. The build appends exactly one line to the extracted
 `main.lua`: `require "dualscreen.init"`. That is the entire modification to
-vanilla.
+vanilla **when no mods are installed**. With mods, the assembler also applies
+their Lovely patches and prepends `require "dualscreen.lovely"` — see
+`docs/decisions/0003-mod-support.md`.
 
 **Wrap, don't replace.** A wrapper inherits upstream fixes; a wholesale copy
 silently reverts them *and* re-imports copyrighted code. Any wholesale copy
@@ -39,11 +41,19 @@ needs a written justification in `docs/decisions/`.
 │   └── decisions/                     ADRs
 ├── lua/dualscreen/                ← the Lua overlay. No Balatro code.
 ├── android/                       ← vendored love-android + this project's Java
+│   └── app/src/main/java/com/balatro/dualscreen/
+│       ├── BalatroActivity, SetupActivity, GameAssembler   the game
+│       ├── ManageActivity, SaveTransfer, ModInstaller      the Manager
+│       ├── BalatroDocumentsProvider, GameDirs              files/ exposure
+│       └── mods/Toml, mods/LovelyPatcher                   patch engine (Java)
 ├── tools/
 │   ├── check_balatro_source.py        container validation
 │   ├── check_guards.py                rule #1 and related invariants
 │   ├── extract_icon.py                icon from the supplied container
 │   ├── make_release_icon.py           regenerates the original release icon
+│   ├── lovely.py                      patch engine (Python, the reference)
+│   ├── test_lovely.py                 its tests and the parity fixtures
+│   ├── check_lovely_parity.py         Python vs Java engines, byte for byte
 │   └── build.py                       extract → inject → package → APK
 ├── local-balatro/    GITIGNORED   test containers (.app and .exe)
 ├── reference/        GITIGNORED   read-only third-party material
@@ -89,6 +99,26 @@ against both with an identical resulting `Game.love`.
 The two containers are **not** equivalent for icons: the `.app` carries the
 game's real artwork in `GameIcon.icns`, while the `.exe` carries it only at
 32 px in a second RT_GROUP_ICON (its largest icon is LÖVE's stock heart).
+
+## Mods and the Manager
+
+Mods are Lovely patch sets applied at ASSEMBLY, not at load (ADR 0003). The
+patch engine exists in Python (`tools/lovely.py`, reference) and Java
+(`LovelyPatcher.java`, on device); `tools/check_lovely_parity.py` must pass
+after touching either, and `tools/test_lovely.py` holds the semantics. The
+Mods folder is `files/save/<identity>/Mods` — inside LÖVE's save dir on
+purpose, so `love.filesystem.read("Mods/...")` works as on desktop.
+
+`ModDownloader` is the ONLY network code and the only reason for the INTERNET
+permission; keep it that way (HTTPS only, user-initiated, nothing sent).
+`BalatroFinder` is the only reason for the storage permissions (All files
+access / READ_EXTERNAL_STORAGE): a user-started search of shared storage for
+a Balatro copy inside Winlator-style containers. The game never reads shared
+storage.
+
+`ManageActivity` runs in its own process (`:manager`) because the game kills
+its own process on exit. It is opened from the in-game settings tab through
+`love.system.openURL("balatrods://manage")`.
 
 ## Ground rules
 

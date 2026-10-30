@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" >
-  <!-- Deliberately NOT declared: INTERNET. Nothing here makes a network
-       call, and the app should not be able to. Inherited from the
-       love-android template and removed. -->
+  <!-- INTERNET exists for ONE feature: the Manager's "Download mod from the
+       web" button (ModDownloader.java), which fetches a zip the user asked
+       for over HTTPS and nothing else. The game itself makes no network
+       calls, and cleartext is blocked by the target SDK. It was deliberately
+       absent before mod downloading existed; see docs/decisions/0003. -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Storage access exists for ONE feature: the setup screen's "Find
+       Balatro on this device" button (BalatroFinder.java), which looks for
+       a Balatro.exe inside Winlator-style containers and Steam clients on
+       shared storage. Android 11+ needs All-files access for that; older
+       versions the runtime permission. Both are asked for only when the
+       button is pressed, and the game never touches shared storage. -->
+  <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+      android:maxSdkVersion="32" />
   <uses-permission android:name="android.permission.VIBRATE" />
   <uses-permission android:name="android.permission.BLUETOOTH" />
   <!-- Stripped by the noRecord flavour; declared so the flavour has a node
@@ -26,7 +38,8 @@
   <application
       android:allowBackup="false"
       android:icon="${ICON}"
-      android:label="${NAME}" >
+      android:label="${NAME}"
+      android:requestLegacyExternalStorage="true" >
     <!-- balatro-dualscreen-thor: our subclass, not love-android's GameActivity.
          It inherits everything about running the game and adds only the
          secondary-display companion. See BalatroActivity.java. -->
@@ -46,6 +59,50 @@
         <category android:name="tv.ouya.intent.category.GAME" />
       </intent-filter>
     </activity>
+
+    <!-- The Manager: mods and saves. Its own process, because the game kills
+         its process on exit (BalatroActivity.onDestroy) and this screen must
+         outlive that. Opened from the in-game settings tab through the
+         balatrods://manage URL, and from its own launcher entry below. -->
+    <activity
+        android:name="com.balatro.dualscreen.ManageActivity"
+        android:exported="true"
+        android:label="Balatro DS Manager"
+        android:launchMode="singleTop"
+        android:process=":manager"
+        android:theme="@android:style/Theme.Material.NoActionBar" >
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="balatrods" />
+      </intent-filter>
+    </activity>
+    <activity-alias
+        android:name="com.balatro.dualscreen.ManagerLauncher"
+        android:targetActivity="com.balatro.dualscreen.ManageActivity"
+        android:exported="true"
+        android:icon="${ICON}"
+        android:label="Balatro DS Manager" >
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity-alias>
+
+    <!-- Lets the system file picker and file managers browse files/ (saves
+         and mods), which Android 11+ otherwise walls off. See
+         BalatroDocumentsProvider. -->
+    <provider
+        android:name="com.balatro.dualscreen.BalatroDocumentsProvider"
+        android:authorities="com.balatro.dualscreen.documents"
+        android:exported="true"
+        android:grantUriPermissions="true"
+        android:permission="android.permission.MANAGE_DOCUMENTS" >
+      <intent-filter>
+        <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+      </intent-filter>
+    </provider>
 
     <activity
         android:name="com.balatro.dualscreen.BalatroActivity"

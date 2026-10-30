@@ -37,6 +37,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -46,9 +47,11 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.List;
 /**
  * First-launch setup: the release APK contains no Balatro, and this screen is
  * where the user's own copy becomes the game.
@@ -82,6 +85,12 @@ public class SetupActivity extends Activity {
     // foreground to it, and onResume then continues.
     private boolean awaitingPin;
     private boolean pinShown;
+
+    private static final int STORAGE_REQUEST = 42;
+    private Button findButton;
+    // Set while the system "All files access" settings page is open for us,
+    // so onResume knows to continue with the search once it is granted.
+    private boolean awaitingStorageAccess;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -155,6 +164,18 @@ public class SetupActivity extends Activity {
         });
         root.addView(pickButton, buttonParams(pad));
 
+        // For people who already run Balatro on this device through a
+        // Windows container or Steam client (Winlator, GameNative, DroidDeck
+        // and the like): look for the game instead of asking them to copy it.
+        findButton = new Button(this);
+        findButton.setText("Find Balatro on this device…");
+        findButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                findOnDevice();
+            }
+        });
+        root.addView(findButton, buttonParams(pad));
+
         status = new TextView(this);
         status.setTypeface(Typeface.MONOSPACE);
         status.setTextSize(14);
@@ -213,24 +234,46 @@ public class SetupActivity extends Activity {
             return;
         }
         final Uri uri = data.getData();
-        status.setText("Reading the selected file…");
+        probeSource(displayName(uri), new Opener() {
+            @Override public InputStream open() throws IOException {
+                InputStream in = getContentResolver().openInputStream(uri);
+                if (in == null) {
+                    throw new IOException("could not open the picked file");
+                }
+                return in;
+            }
+        });
+    }
+
+    /** Where a candidate copy's bytes come from: a picked document or a file. */
+    private interface Opener {
+        InputStream open() throws IOException;
+    }
+
+    private void probeSource(final String name, final Opener opener) {
+        status.setText("Reading " + name + "…");
         pickButton.setEnabled(false);
+        if (findButton != null) {
+            findButton.setEnabled(false);
+        }
         buildButton.setEnabled(false);
 
         new Thread(new Runnable() {
             @Override public void run() {
-                probeInBackground(uri);
+                probeInBackground(name, opener);
             }
         }, "balatro-probe").start();
     }
 
-    private void probeInBackground(Uri uri) {
-        String name = displayName(uri);
+    private void probeInBackground(String name, Opener opener) {
         GameAssembler.Info result = null;
         String failure = null;
         try {
-            File cached = new File(getCacheDir(), "balatro-source.bin");
-            try (InputStream in = getContentResolver().openInputStream(uri);
+            // Kept under files/, not cache/: the Manager rebuilds the game
+            // from this copy when mods are added, and a cache can be cleared
+            // under us at any time.
+            File cached = GameDirs.keptSource(this);
+            try (InputStream in = opener.open();
                  FileOutputStream out = new FileOutputStream(cached)) {
                 byte[] buf = new byte[64 * 1024];
                 for (int n; (n = in.read(buf)) > 0; ) {
@@ -252,6 +295,9 @@ public class SetupActivity extends Activity {
         runOnUiThread(new Runnable() {
             @Override public void run() {
                 pickButton.setEnabled(true);
+                if (findButton != null) {
+                    findButton.setEnabled(true);
+                }
                 if (error != null || probed == null) {
                     status.setText("Could not read that file:\n  " + error);
                     return;
@@ -367,6 +413,15 @@ public class SetupActivity extends Activity {
             awaitingPin = false;
             launchGame();
         }
+        if (awaitingStorageAccess) {
+            awaitingStorageAccess = false;
+            if (BalatroFinder.hasStorageAccess(this)) {
+                runFinder();
+            } else {
+                status.setText("All files access was not granted; the search was"
+                        + " skipped. You can still choose the file by hand.");
+            }
+        }
     }
 
     private void requestPin(ShortcutManager sm) {
@@ -431,6 +486,123 @@ public class SetupActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
+    // Find on device
+    // ------------------------------------------------------------------
+
+    private void findOnDevice() {
+        if (BalatroFinder.hasStorageAccess(this)) {
+            runFinder();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow access to files")
+                    .setMessage("To look for Balatro inside Winlator, GameNative, DroidDeck"
+                            + " or a folder you copied it to, Android needs you to allow"
+                            + " this app \"All files access\" on the next screen. It is"
+                            + " used only for this search; the game itself never reads"
+                            + " shared storage.")
+                    .setPositiveButton("Open settings", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            awaitingStorageAccess = true;
+                            Intent i = new Intent(
+                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:" + getPackageName()));
+                            try {
+                                startActivity(i);
+                            } catch (Exception e) {
+                                startActivity(new Intent(
+                                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                            }
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else {
+            requestPermissions(new String[] { android.Manifest.permission.READ_EXTERNAL_STORAGE },
+                    STORAGE_REQUEST);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(request, perms, results);
+        if (request == STORAGE_REQUEST) {
+            if (BalatroFinder.hasStorageAccess(this)) {
+                runFinder();
+            } else {
+                status.setText("Without storage access the search cannot run. You can"
+                        + " still choose the file by hand above.");
+            }
+        }
+    }
+
+    private void runFinder() {
+        status.setText("Searching shared storage for Balatro\u2026");
+        pickButton.setEnabled(false);
+        findButton.setEnabled(false);
+        buildButton.setEnabled(false);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final List<BalatroFinder.Candidate> found = BalatroFinder.scan(
+                        SetupActivity.this, 25000, new BalatroFinder.Progress() {
+                    @Override public void update(final String msg) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                status.setText(msg);
+                            }
+                        });
+                    }
+                });
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        pickButton.setEnabled(true);
+                        findButton.setEnabled(true);
+                        showFound(found);
+                    }
+                });
+            }
+        }, "balatro-find").start();
+    }
+
+    private void showFound(final List<BalatroFinder.Candidate> found) {
+        if (found.isEmpty()) {
+            status.setText("No Balatro copy found in shared storage.\n\n"
+                    + "Where this can and cannot look:\n"
+                    + "  - Winlator: a game on the D: drive (Downloads) or any drive"
+                    + " you mapped to shared storage is found; one installed on C:"
+                    + " lives inside Winlator's private storage, which no other app"
+                    + " can read. Move the Balatro folder to D: or copy it out with"
+                    + " Winlator's file manager.\n"
+                    + "  - GameNative / DroidDeck: a library kept in the app's own"
+                    + " storage is private too; export the game folder to Downloads"
+                    + " first, or set the library to a shared folder.\n"
+                    + "  - Otherwise copy Balatro.exe from a PC to Downloads and use"
+                    + " \"Choose your Balatro file\".");
+            return;
+        }
+        final String[] labels = new String[found.size()];
+        for (int i = 0; i < found.size(); i++) {
+            labels[i] = found.get(i).describe();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Found " + found.size() + " possible cop"
+                        + (found.size() == 1 ? "y" : "ies"))
+                .setItems(labels, new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        final File f = found.get(which).file;
+                        probeSource(f.getName(), new Opener() {
+                            @Override public InputStream open() throws IOException {
+                                return new FileInputStream(f);
+                            }
+                        });
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ------------------------------------------------------------------
     // Build
     // ------------------------------------------------------------------
 
@@ -447,6 +619,7 @@ public class SetupActivity extends Activity {
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
+                    final GameAssembler.Report report = new GameAssembler.Report();
                     GameAssembler.assemble(SetupActivity.this, info,
                             new GameAssembler.Progress() {
                         @Override public void update(final String msg,
@@ -458,11 +631,11 @@ public class SetupActivity extends Activity {
                                 }
                             });
                         }
-                    });
+                    }, report);
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             progress.setProgress(100);
-                            status.setText("Done.");
+                            status.setText("Done." + ManageActivity.describe(report));
                             offerShortcutThenLaunch();
                         }
                     });

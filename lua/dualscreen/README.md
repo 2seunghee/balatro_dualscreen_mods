@@ -13,6 +13,11 @@ That append lands after `main.lua`'s `require` block (which ends at line 29) and
 before `love.load` runs, so every class and callback exists but nothing has
 executed yet.
 
+When mods are installed the assembler also PREPENDS `require "dualscreen.lovely"`
+to `main.lua`. `lovely.lua` is the runtime stand-in for the Lovely injector:
+it provides `require "lovely"` and preloads the mods' modules, and nothing
+else — the patches themselves were applied to the sources at assembly.
+
 ## The rule
 
 **Wrap. Do not replace.**

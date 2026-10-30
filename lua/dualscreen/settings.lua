@@ -46,7 +46,19 @@ function settings.enabled()
     if G.SETTINGS.dualscreen_fps60 == nil then
         G.SETTINGS.dualscreen_fps60 = true
     end
+    -- Default OFF: on the device this was built on the companion is the
+    -- right screen. It exists for devices where it is not (see swap.lua).
+    if G.SETTINGS.dualscreen_swap == nil then
+        G.SETTINGS.dualscreen_swap = false
+    end
     return G.SETTINGS.dualscreen_enabled and true or false
+end
+
+--- Show the hand on THIS screen and the table on the companion. Gated on
+--- the master toggle like the other panel options.
+function settings.swap()
+    return settings.enabled()
+       and G.SETTINGS and G.SETTINGS.dualscreen_swap and true or false
 end
 
 --- Is the hand score meant to be on screen 2? Only meaningful when the whole
@@ -141,11 +153,13 @@ function settings.on_change()
                 cons   = G.SETTINGS.dualscreen_consumables and true or false,
                 jokers = G.SETTINGS.dualscreen_larger_jokers and true or false,
                 crt    = G.SETTINGS.dualscreen_crt and true or false,
+                swap   = G.SETTINGS.dualscreen_swap and true or false,
             }
             G.SETTINGS.dualscreen_hand_score    = false
             G.SETTINGS.dualscreen_consumables   = false
             G.SETTINGS.dualscreen_larger_jokers = false
             G.SETTINGS.dualscreen_crt           = false
+            G.SETTINGS.dualscreen_swap          = false
         else
             local st = G.SETTINGS.dualscreen_stash
             if st then
@@ -153,6 +167,7 @@ function settings.on_change()
                 G.SETTINGS.dualscreen_consumables   = st.cons and true or false
                 G.SETTINGS.dualscreen_larger_jokers = st.jokers and true or false
                 G.SETTINGS.dualscreen_crt           = st.crt and true or false
+                G.SETTINGS.dualscreen_swap          = st.swap and true or false
             end
             G.SETTINGS.dualscreen_stash = nil
         end
@@ -169,6 +184,7 @@ function settings.on_change()
            .. " cons=" .. tostring(settings.consumables())
            .. " jokers=" .. tostring(settings.larger_jokers())
            .. " crt2=" .. tostring(settings.crt2())
+           .. " swap=" .. tostring(settings.swap())
            .. " rgb=" .. tostring(settings.rgb_leds()))
     if G and G.save_settings then
         pcall(G.save_settings, G)
@@ -235,6 +251,14 @@ function settings.install()
         pcall(love.system.openURL, "https://ko-fi.com/rosbean")
     end
 
+    -- The Manager (mods, save import/export). love.system.openURL fires an
+    -- ACTION_VIEW intent on Android, and ManageActivity claims the
+    -- balatrods: scheme, so this opens it without any new native plumbing.
+    -- On a desktop run the URL goes nowhere, harmlessly.
+    G.FUNCS.dualscreen_manager = function()
+        pcall(love.system.openURL, "balatrods://manage")
+    end
+
     local orig_create_tabs = create_tabs
     function create_tabs(args)
         if args and type(args.tabs) == "table" then
@@ -297,6 +321,12 @@ function settings.install()
                     ref_value = "dualscreen_crt",
                     callback = settings.on_change,
                 })
+                nodes[#nodes + 1] = create_toggle({
+                    label = "Swap screens (hand on this screen) - experimental",
+                    ref_table = G.SETTINGS,
+                    ref_value = "dualscreen_swap",
+                    callback = settings.on_change,
+                })
             end
             -- Independent of the master toggle: the LEDs are hardware on the
             -- device itself, not a second-screen feature. Visible always,
@@ -313,6 +343,29 @@ function settings.install()
                 ref_value = "dualscreen_fps60",
                 callback = settings.on_change,
             })
+            -- Mods and saves live in the Manager, a separate Android screen;
+            -- see G.FUNCS.dualscreen_manager in install(). Only offered when
+            -- the bridge exists, i.e. this is the Android build.
+            if DS.bridge and DS.bridge.native_available then
+                nodes[#nodes + 1] = {
+                    n = G.UIT.R,
+                    config = { align = "cm", padding = 0.08 },
+                    nodes = {
+                        { n = G.UIT.R, config = {
+                            align = "cm", padding = 0.12, r = 0.1,
+                            minw = 3.4, minh = 0.7,
+                            colour = G.C.BLUE,
+                            button = "dualscreen_manager",
+                            hover = true, shadow = true,
+                        }, nodes = {
+                            { n = G.UIT.T, config = {
+                                text = "Mods & saves (opens the Manager)",
+                                scale = 0.4, colour = G.C.WHITE, shadow = true,
+                            } },
+                        } },
+                    },
+                }
+            end
             -- Credit and a Ko-fi link. The button goes through
             -- love.system.openURL, which Android routes to the default
             -- browser; G.FUNCS.dualscreen_kofi is defined in install().

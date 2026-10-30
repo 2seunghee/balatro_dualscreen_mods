@@ -134,6 +134,19 @@ This is an unofficial fan project. It is not affiliated with, endorsed by, or
 connected to LocalThunk, Playstack, or AYN.
 
 
+5. Lovely injector — PATCH FORMAT IMPLEMENTED, NO CODE TAKEN
+-----------------------------------------------------------
+
+Upstream project: https://github.com/ethangreen-dev/lovely-injector
+
+`tools/lovely.py` and `LovelyPatcher.java` apply mods written in Lovely's
+patch format (`lovely.toml`: pattern, regex, copy and module patches). The
+behaviour was taken from reading lovely-core's Rust source so that mods behave
+the same here as on desktop; the implementation is this project's own, in
+Python and Java, and no Lovely code is included. Mods themselves are not part
+of this repository: the person installing one supplies it, as with the game.
+
+
 Trademarks
 ----------
 

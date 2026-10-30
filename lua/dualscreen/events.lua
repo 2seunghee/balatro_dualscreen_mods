@@ -24,6 +24,11 @@ end
 
 local handlers = {}
 
+-- Set for the duration of a dispatch: did this event come from the
+-- companion window (true) or from this window's own touches while the
+-- screens are swapped (false)? Only CLICK and HOVER_AT care.
+local ev_from_companion = true
+
 handlers.TOGGLE_CARD = function(arg)
     if not in_run() then
         return false
@@ -150,7 +155,18 @@ handlers.HOVER_AT = function(arg)
     DS.mark_touch_input()
 
     -- The HOVER predicate, not the click one: see DS.hover_test.
-    local node = DS.hover_test(tonumber(px), tonumber(py))
+    --
+    -- Swapped screens: a tap on the companion lands on the game's own frame,
+    -- so it resolves against G.DRAW_HASH instead (swap.lua). The companion
+    -- does not know which content it is showing and sends the same event
+    -- either way; this is the one place the two are told apart.
+    local swap = require("dualscreen.swap")
+    local node
+    if ev_from_companion and swap.active() then
+        node = swap.hover_main(tonumber(px), tonumber(py))
+    else
+        node = DS.hover_test(tonumber(px), tonumber(py))
+    end
 
     -- Walk up to the Card, if the tap landed on one of its children.
     -- `ability` is present on every Card and on nothing else we hit-test.
@@ -200,6 +216,10 @@ end
 handlers.CLICK = function(arg)
     local px, py = tostring(arg):match("^(-?%d+)|(-?%d+)$")
     if not px then return false end
+    local swap = require("dualscreen.swap")
+    if ev_from_companion and swap.active() then
+        return swap.click_main(tonumber(px), tonumber(py)) and true or false
+    end
     return DS.click_at(tonumber(px), tonumber(py)) and true or false
 end
 
@@ -243,16 +263,21 @@ end
 
 --- Dispatch one event. Returns true if it mutated the hand, so the caller
 --- knows to bump the generation and push a fresh snapshot.
-function events.dispatch(ev)
+function events.dispatch(ev, from_companion)
     local h = handlers[ev.name]
     if not h then
         log("unknown event: " .. tostring(ev.name))
         return false
     end
 
+    -- Default true: every caller before swapped screens existed was the
+    -- companion, and still is unless it says otherwise.
+    ev_from_companion = (from_companion ~= false)
+
     -- pcall so a bad event can never take the game down. Screen 2 is an
     -- input surface; a malformed message from it is a bug to log, not a crash.
     local ok, changed = pcall(h, ev.arg)
+    ev_from_companion = true
     if not ok then
         log(("handler %s errored: %s"):format(tostring(ev.name), tostring(changed)))
         return false
